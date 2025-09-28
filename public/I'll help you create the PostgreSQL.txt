@@ -1,0 +1,208 @@
+I'll help you create the PostgreSQL database and tables for your WhatsApp message number tracking system. Here are all the required SQL queries:
+
+1. Database Creation
+sql
+-- Create the main database
+CREATE DATABASE whatsapp_message_db
+    WITH 
+    OWNER = postgres
+    ENCODING = 'UTF8'
+    CONNECTION LIMIT = -1;
+2. Connect to the Database
+sql
+\c whatsapp_message_db;
+3. Tables Creation
+Users Table
+sql
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    phone_number VARCHAR(20) UNIQUE,
+    whatsapp_number VARCHAR(20) UNIQUE,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Index for faster queries
+CREATE INDEX idx_users_username ON users(username);
+CREATE INDEX idx_users_email ON users(email);
+CREATE INDEX idx_users_phone ON users(phone_number);
+WhatsApp Messages Table
+sql
+CREATE TABLE whatsapp_messages (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    message_id VARCHAR(100) UNIQUE NOT NULL,
+    sender_number VARCHAR(20) NOT NULL,
+    receiver_number VARCHAR(20) NOT NULL,
+    message_text TEXT,
+    message_type VARCHAR(20) DEFAULT 'TEXT',
+    media_url VARCHAR(500),
+    media_type VARCHAR(50),
+    timestamp TIMESTAMP NOT NULL,
+    status VARCHAR(20) DEFAULT 'RECEIVED',
+    is_read BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes for performance
+CREATE INDEX idx_whatsapp_msgs_user_id ON whatsapp_messages(user_id);
+CREATE INDEX idx_whatsapp_msgs_sender ON whatsapp_messages(sender_number);
+CREATE INDEX idx_whatsapp_msgs_receiver ON whatsapp_messages(receiver_number);
+CREATE INDEX idx_whatsapp_msgs_timestamp ON whatsapp_messages(timestamp);
+CREATE INDEX idx_whatsapp_msgs_status ON whatsapp_messages(status);
+Extracted Numbers Table
+sql
+CREATE TABLE extracted_numbers (
+    id SERIAL PRIMARY KEY,
+    message_id INTEGER REFERENCES whatsapp_messages(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    extracted_number VARCHAR(20) NOT NULL,
+    number_type VARCHAR(50),
+    context TEXT,
+    confidence_score DECIMAL(3,2) DEFAULT 1.00,
+    is_valid BOOLEAN DEFAULT TRUE,
+    validation_notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes
+CREATE INDEX idx_extracted_nums_message ON extracted_numbers(message_id);
+CREATE INDEX idx_extracted_nums_user ON extracted_numbers(user_id);
+CREATE INDEX idx_extracted_nums_number ON extracted_numbers(extracted_number);
+CREATE INDEX idx_extracted_nums_valid ON extracted_numbers(is_valid);
+User Contacts Table
+sql
+CREATE TABLE user_contacts (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    contact_name VARCHAR(100),
+    phone_number VARCHAR(20) NOT NULL,
+    whatsapp_number VARCHAR(20),
+    email VARCHAR(100),
+    company VARCHAR(100),
+    notes TEXT,
+    is_favorite BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, phone_number)
+);
+
+-- Indexes
+CREATE INDEX idx_user_contacts_user ON user_contacts(user_id);
+CREATE INDEX idx_user_contacts_phone ON user_contacts(phone_number);
+CREATE INDEX idx_user_contacts_name ON user_contacts(contact_name);
+Message Templates Table (Optional - for automated responses)
+sql
+CREATE TABLE message_templates (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    template_name VARCHAR(100) NOT NULL,
+    template_text TEXT NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Index
+CREATE INDEX idx_msg_templates_user ON message_templates(user_id);
+API Keys Table (For authentication)
+sql
+CREATE TABLE api_keys (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    api_key VARCHAR(255) UNIQUE NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP,
+    last_used TIMESTAMP
+);
+
+-- Index
+CREATE INDEX idx_api_keys_user ON api_keys(user_id);
+CREATE INDEX idx_api_keys_key ON api_keys(api_key);
+4. Additional Indexes and Constraints
+sql
+-- Add foreign key constraints if not already defined
+ALTER TABLE whatsapp_messages 
+ADD CONSTRAINT fk_whatsapp_messages_user 
+FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+
+ALTER TABLE extracted_numbers 
+ADD CONSTRAINT fk_extracted_numbers_message 
+FOREIGN KEY (message_id) REFERENCES whatsapp_messages(id) ON DELETE CASCADE;
+
+ALTER TABLE extracted_numbers 
+ADD CONSTRAINT fk_extracted_numbers_user 
+FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+
+-- Add check constraints
+ALTER TABLE whatsapp_messages 
+ADD CONSTRAINT chk_message_status 
+CHECK (status IN ('RECEIVED', 'PROCESSED', 'ERROR', 'ARCHIVED'));
+
+ALTER TABLE extracted_numbers 
+ADD CONSTRAINT chk_confidence_score 
+CHECK (confidence_score >= 0 AND confidence_score <= 1);
+5. Sample Data Insertion (Optional)
+sql
+-- Insert sample user
+INSERT INTO users (username, email, password_hash, phone_number, whatsapp_number) 
+VALUES ('testuser', 'test@example.com', 'hashed_password', '+1234567890', '+1234567890');
+
+-- Insert sample message
+INSERT INTO whatsapp_messages (user_id, message_id, sender_number, receiver_number, message_text, timestamp) 
+VALUES (1, 'msg_001', '+9876543210', '+1234567890', 'Hello, my number is 555-1234', NOW());
+6. Useful Views (Optional)
+sql
+-- View for messages with extracted numbers
+CREATE VIEW message_with_numbers AS
+SELECT 
+    wm.*,
+    en.extracted_number,
+    en.number_type,
+    en.is_valid
+FROM whatsapp_messages wm
+LEFT JOIN extracted_numbers en ON wm.id = en.message_id;
+
+-- View for user contact statistics
+CREATE VIEW user_contact_stats AS
+SELECT 
+    u.id as user_id,
+    u.username,
+    COUNT(DISTINCT uc.id) as total_contacts,
+    COUNT(DISTINCT en.id) as numbers_extracted,
+    COUNT(DISTINCT wm.id) as total_messages
+FROM users u
+LEFT JOIN user_contacts uc ON u.id = uc.user_id
+LEFT JOIN whatsapp_messages wm ON u.id = wm.user_id
+LEFT JOIN extracted_numbers en ON u.id = en.user_id
+GROUP BY u.id, u.username;
+7. Database User Creation (For Application)
+sql
+-- Create a dedicated user for your application
+CREATE USER app_user WITH PASSWORD 'your_secure_password';
+
+-- Grant necessary permissions
+GRANT CONNECT ON DATABASE whatsapp_message_db TO app_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_user;
+This database schema provides:
+
+User management with authentication
+
+WhatsApp message storage with metadata
+
+Number extraction tracking
+
+Contact management
+
+API key management for secure access
+
+Proper indexing for performance
+
+You can execute these SQL queries in your PostgreSQL database to set up the complete structure for your Spring Boot backend.

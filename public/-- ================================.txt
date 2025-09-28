@@ -1,0 +1,371 @@
+-- =========================================================
+-- WhatsApp Messages DB Schema (Minimal Version)
+-- PostgreSQL 13+
+-- =========================================================
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- ENUMs for direction, type, status
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'message_direction') THEN
+    CREATE TYPE message_direction AS ENUM ('inbound','outbound');
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'message_type') THEN
+    CREATE TYPE message_type AS ENUM ('text','image','video','audio','document','sticker','location','contacts','interactive','unknown');
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'message_status') THEN
+    CREATE TYPE message_status AS ENUM ('queued','sent','delivered','read','failed');
+  END IF;
+END$$;
+
+-- Trigger function for updated_at
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS trigger AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Main messages table
+CREATE TABLE IF NOT EXISTS message (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  from_number     TEXT NOT NULL,                         -- sender number (E.164)
+  to_number       TEXT NOT NULL,                         -- receiver number (E.164)
+  direction       message_direction NOT NULL,            -- inbound / outbound
+  provider_msg_id TEXT UNIQUE,                           -- WhatsApp message ID
+  msg_type        message_type NOT NULL DEFAULT 'text',  -- type of message
+  body            TEXT,                                  -- message content
+  status          message_status NOT NULL DEFAULT 'queued',
+  media_url       TEXT,                                  -- if media type
+  raw_payload     JSONB NOT NULL DEFAULT '{}'::jsonb,    -- full webhook JSON
+  sent_at         TIMESTAMPTZ,                           -- time sent
+  delivered_at    TIMESTAMPTZ,
+  read_at         TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_message_from ON message(from_number);
+CREATE INDEX IF NOT EXISTS idx_message_to ON message(to_number);
+CREATE INDEX IF NOT EXISTS idx_message_created ON message(created_at DESC);
+
+-- Auto update updated_at
+CREATE TRIGGER trg_message_updated
+BEFORE UPDATE ON message
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+-- =========================================================
+-- WhatsApp Inbox DB Schema (PostgreSQL 13+)
+-- Multi-tenant by app_user_id. Safe for Spring Boot + Laravel.
+-- =========================================================
+
+-- Optional: create a dedicated database
+-- CREATE DATABASE whatsapp_inbox TEMPLATE=template1;
+
+-- Extensions
+CREATE EXTENSION IF NOT EXISTS pgcrypto;     -- for gen_random_uuid()
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";  -- optional, not used here
+
+-- =========================================================
+-- Enums
+-- =========================================================
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'message_direction') THEN
+    CREATE TYPE message_direction AS ENUM ('inbound','outbound');
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'message_status') THEN
+    CREATE TYPE message_status AS ENUM ('queued','sent','delivered','read','failed');
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'conversation_state') THEN
+    CREATE TYPE conversation_state AS ENUM ('open','closed','snoozed');
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'optin_method') THEN
+    CREATE TYPE optin_method AS ENUM ('whatsapp','web_form','import','api');
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'message_type') THEN
+    CREATE TYPE message_type AS ENUM ('text','image','video','audio','document','sticker','location','contacts','interactive','unknown');
+  END IF;
+END$$;
+
+-- =========================================================
+-- updated_at trigger
+-- =========================================================
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS trigger AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- =========================================================
+-- Core tables
+-- =========================================================
+
+-- 1) Application users (your tenants / operators)
+CREATE TABLE IF NOT EXISTS app_user (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name         TEXT NOT NULL,
+  email        CITEXT UNIQUE,
+  role         TEXT DEFAULT 'user',
+  is_active    BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TRIGGER trg_app_user_updated
+BEFORE UPDATE ON app_user
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 2) WhatsApp business accounts / phone numbers owned by a user
+CREATE TABLE IF NOT EXISTS whatsapp_account (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  app_user_id        UUID NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+  provider           TEXT NOT NULL DEFAULT 'meta',                          -- e.g., meta/twilio/360dialog
+  business_acct_id   TEXT,                                                  -- Meta WABA ID
+  phone_number_id    TEXT,                                                  -- Meta phone_number_id
+  phone_display      TEXT,                                                  -- human-readable number
+  phone_e164         TEXT,                                                  -- +9198...
+  verified_name      TEXT,
+  meta               JSONB NOT NULL DEFAULT '{}'::jsonb,                    -- misc provider config
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (app_user_id, phone_e164)
+);
+CREATE INDEX IF NOT EXISTS idx_whatsapp_account_user ON whatsapp_account(app_user_id);
+CREATE TRIGGER trg_whatsapp_account_updated
+BEFORE UPDATE ON whatsapp_account
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 3) Contacts (WhatsApp users who message you)
+CREATE TABLE IF NOT EXISTS contact (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  app_user_id   UUID NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+  wa_id         TEXT NOT NULL,                        -- usually WhatsApp phone in E.164
+  display_name  TEXT,
+  first_name    TEXT,
+  last_name     TEXT,
+  locale        TEXT,
+  timezone      TEXT,
+  is_blocked    BOOLEAN NOT NULL DEFAULT FALSE,
+  notes         TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (app_user_id, wa_id)
+);
+CREATE INDEX IF NOT EXISTS idx_contact_user_wa ON contact(app_user_id, wa_id);
+CREATE INDEX IF NOT EXISTS idx_contact_user ON contact(app_user_id);
+CREATE TRIGGER trg_contact_updated
+BEFORE UPDATE ON contact
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 4) Conversations (logical thread per contact + account)
+CREATE TABLE IF NOT EXISTS conversation (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  app_user_id       UUID NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+  contact_id        UUID NOT NULL REFERENCES contact(id) ON DELETE CASCADE,
+  whatsapp_account_id UUID NOT NULL REFERENCES whatsapp_account(id) ON DELETE CASCADE,
+  state             conversation_state NOT NULL DEFAULT 'open',
+  last_message_at   TIMESTAMPTZ,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (app_user_id, contact_id, whatsapp_account_id, state) DEFERRABLE INITIALLY IMMEDIATE
+  -- If you prefer one active conversation per contact/account, enforce with a partial index below.
+);
+-- One active conversation per contact+account (state != 'closed')
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_conversation
+ON conversation(app_user_id, contact_id, whatsapp_account_id)
+WHERE state <> 'closed';
+
+CREATE INDEX IF NOT EXISTS idx_conversation_user_contact ON conversation(app_user_id, contact_id);
+CREATE TRIGGER trg_conversation_updated
+BEFORE UPDATE ON conversation
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 5) Media referenced by messages
+CREATE TABLE IF NOT EXISTS media (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  app_user_id      UUID NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+  provider_media_id TEXT,                         -- id from provider
+  mime_type        TEXT,
+  file_name        TEXT,
+  size_bytes       BIGINT,
+  sha256           TEXT,
+  url              TEXT,                          -- signed or temporary URL (store cautiously)
+  expires_at       TIMESTAMPTZ,
+  meta             JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (app_user_id, provider_media_id)
+);
+CREATE INDEX IF NOT EXISTS idx_media_user ON media(app_user_id);
+CREATE TRIGGER trg_media_updated
+BEFORE UPDATE ON media
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 6) Messages
+CREATE TABLE IF NOT EXISTS message (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  app_user_id        UUID NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+  conversation_id    UUID NOT NULL REFERENCES conversation(id) ON DELETE CASCADE,
+  contact_id         UUID NOT NULL REFERENCES contact(id) ON DELETE CASCADE,
+  whatsapp_account_id UUID NOT NULL REFERENCES whatsapp_account(id) ON DELETE CASCADE,
+  direction          message_direction NOT NULL,
+  provider_msg_id    TEXT,                                -- message id from provider
+  msg_type           message_type NOT NULL DEFAULT 'text',
+  body               TEXT,                                -- for text messages
+  status             message_status NOT NULL DEFAULT 'queued',
+  sent_at            TIMESTAMPTZ,                         -- when sent to provider
+  delivered_at       TIMESTAMPTZ,
+  read_at            TIMESTAMPTZ,
+  media_id           UUID REFERENCES media(id) ON DELETE SET NULL,
+  raw_payload        JSONB NOT NULL DEFAULT '{}'::jsonb,  -- full webhook payload for traceability
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (app_user_id, provider_msg_id)                   -- avoids duplicates on reprocessing webhooks
+);
+CREATE INDEX IF NOT EXISTS idx_message_conv_created ON message(conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_message_user_created ON message(app_user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_message_contact ON message(contact_id);
+CREATE INDEX IF NOT EXISTS idx_message_provider ON message(provider_msg_id);
+CREATE TRIGGER trg_message_updated
+BEFORE UPDATE ON message
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 7) Opt-in / Consent tracking
+CREATE TABLE IF NOT EXISTS contact_optin (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  app_user_id   UUID NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+  contact_id    UUID NOT NULL REFERENCES contact(id) ON DELETE CASCADE,
+  method        optin_method NOT NULL,
+  consent       BOOLEAN NOT NULL,           -- true = opted in, false = opted out
+  source_note   TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (contact_id, method, created_at)   -- allows multiple historical entries; uniqueness depends on design
+);
+CREATE INDEX IF NOT EXISTS idx_optin_contact ON contact_optin(contact_id);
+
+-- 8) Webhook logs (store raw events before/after processing)
+CREATE TABLE IF NOT EXISTS webhook_event (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  app_user_id    UUID NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+  source         TEXT NOT NULL DEFAULT 'meta',    -- meta/twilio/etc.
+  received_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  signature      TEXT,
+  payload        JSONB NOT NULL,
+  processed      BOOLEAN NOT NULL DEFAULT FALSE,
+  message_id     UUID REFERENCES message(id) ON DELETE SET NULL,  -- link after processing
+  error          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_received ON webhook_event(received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_webhook_user_processed ON webhook_event(app_user_id, processed);
+
+-- 9) Tagging (optional but useful)
+CREATE TABLE IF NOT EXISTS tag (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  app_user_id  UUID NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+  name         TEXT NOT NULL,
+  color        TEXT,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (app_user_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS contact_tag (
+  contact_id   UUID NOT NULL REFERENCES contact(id) ON DELETE CASCADE,
+  tag_id       UUID NOT NULL REFERENCES tag(id) ON DELETE CASCADE,
+  PRIMARY KEY (contact_id, tag_id)
+);
+
+-- 10) Simple phone book (if you want to store multiple phones per contact beyond wa_id)
+CREATE TABLE IF NOT EXISTS contact_phone (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  contact_id   UUID NOT NULL REFERENCES contact(id) ON DELETE CASCADE,
+  label        TEXT,               -- 'mobile', 'work', etc.
+  phone_e164   TEXT NOT NULL,
+  UNIQUE (contact_id, phone_e164)
+);
+CREATE INDEX IF NOT EXISTS idx_contact_phone_contact ON contact_phone(contact_id);
+
+-- =========================================================
+-- Views
+-- =========================================================
+-- Latest message per conversation (handy for inbox lists)
+CREATE OR REPLACE VIEW v_conversation_last_message AS
+SELECT m.*
+FROM (
+  SELECT conversation_id, MAX(created_at) AS max_ts
+  FROM message
+  GROUP BY conversation_id
+) AS latest
+JOIN message m
+  ON m.conversation_id = latest.conversation_id
+ AND m.created_at = latest.max_ts;
+
+-- =========================================================
+-- Example seed (optional)
+-- =========================================================
+-- INSERT INTO app_user (name, email) VALUES ('Faraz','faraz@example.com');
+-- INSERT INTO whatsapp_account (app_user_id, provider, business_acct_id, phone_number_id, phone_display, phone_e164)
+-- VALUES ('<app_user_uuid>','meta','<WABA_ID>','<PHONE_ID>','+91 98765 43210','+919876543210');
+
+-- =========================================================
+-- Upsert helpers (typical webhook flow)
+-- =========================================================
+
+-- 1) Upsert contact by wa_id within a tenant
+-- :app_user_id, :wa_id, :display_name are parameters from your backend
+-- This ensures you don't duplicate contacts on repeated webhook deliveries
+-- Example in one statement via INSERT ... ON CONFLICT DO UPDATE:
+-- (Use from your code with prepared statements)
+-- Note: Replace the variables with actual values in your application code.
+-- ---------------------------------------------
+-- INSERT INTO contact (id, app_user_id, wa_id, display_name)
+-- VALUES (gen_random_uuid(), :app_user_id, :wa_id, :display_name)
+-- ON CONFLICT (app_user_id, wa_id)
+-- DO UPDATE SET display_name = COALESCE(EXCLUDED.display_name, contact.display_name),
+--               updated_at = NOW()
+-- RETURNING *;
+
+-- 2) Ensure an active conversation exists for (user, contact, account)
+-- You can attempt insert; if conflict on uq_active_conversation, select the existing one.
+-- ---------------------------------------------
+-- INSERT INTO conversation (id, app_user_id, contact_id, whatsapp_account_id, state, last_message_at)
+-- VALUES (gen_random_uuid(), :app_user_id, :contact_id, :account_id, 'open', NOW())
+-- ON CONFLICT ON CONSTRAINT uq_active_conversation
+-- DO UPDATE SET last_message_at = NOW(),
+--               updated_at = NOW()
+-- RETURNING *;
+
+-- 3) Insert inbound message
+-- ---------------------------------------------
+-- INSERT INTO message (
+--   id, app_user_id, conversation_id, contact_id, whatsapp_account_id,
+--   direction, provider_msg_id, msg_type, body, status, sent_at, created_at, raw_payload
+-- ) VALUES (
+--   gen_random_uuid(), :app_user_id, :conversation_id, :contact_id, :account_id,
+--   'inbound', :provider_msg_id, :msg_type, :body, 'delivered', :event_timestamp, NOW(), :payload::jsonb
+-- )
+-- ON CONFLICT (app_user_id, provider_msg_id) DO NOTHING
+-- RETURNING *;
+
+-- 4) Link conversation last_message_at (if not using ON CONFLICT above)
+-- ---------------------------------------------
+-- UPDATE conversation
+-- SET last_message_at = NOW()
+-- WHERE id = :conversation_id;
+
+-- 5) Media save (if inbound has media)
+-- ---------------------------------------------
+-- INSERT INTO media (id, app_user_id, provider_media_id, mime_type, file_name, size_bytes, sha256, url, expires_at, meta)
+-- VALUES (
+--   gen_random_uuid(), :app_user_id, :provider_media_id, :mime_type, :file_name, :size_bytes, :sha256, :url, :expires_at, :meta::jsonb
+-- )
+-- ON CONFLICT (app_user_id, provider_media_id)

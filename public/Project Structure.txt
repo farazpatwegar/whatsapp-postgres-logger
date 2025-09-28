@@ -1,0 +1,307 @@
+Project Structure
+whatsapp-postgres-logger/
+├── index.js          
+# Main server + WhatsApp + PostgreSQL integration
+
+├── package.json      
+# Node.js dependencies
+
+├── .
+env
+              
+# PostgreSQL credentials and server port
+
+├── public/           
+# Frontend assets
+
+│   ├── style.css
+│   └── script.js
+└── views/
+    └── index.html    
+# Web interface for viewing messages<!-- views/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WhatsApp Message Logger</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>WhatsApp Message Logger</h1>
+      <p>View all messages received on WhatsApp</p>
+    </header>
+    
+    <div class="status">
+      <h2>Status: <span id="status">Loading...</span></h2>
+    </div>
+    
+    <div class="messages-container">
+      <h2>Recent Messages</h2>
+      <button id="refresh-btn">Refresh Messages</button>
+      <div id="messages-list"></div>
+    </div>
+  </div>
+  
+  <script src="/script.js"></script>
+</body>
+</html>  index.js // index.js
+require('dotenv').config();
+const express = require('express');
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode-terminal');
+const { Pool } = require('pg');
+const path = require('path');
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+// ====================
+// PostgreSQL Connection
+// ====================
+const pool = new Pool({
+  user: process.env.DB_USER,
+  host: process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  password: process.env.DB_PASSWORD,
+  port: process.env.DB_PORT,
+});
+
+// Create WhatsApp messages table if it doesn't exist
+(async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS whatsapp_messages (
+        id SERIAL PRIMARY KEY,
+        message_id VARCHAR(255) UNIQUE,
+        sender VARCHAR(255),
+        message TEXT,
+        timestamp BIGINT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Database table ready');
+  } catch (err) {
+    console.error('❌ Error creating table:', err);
+  }
+})();
+
+// ====================
+// Middleware
+// ====================
+app.use(express.static('public'));
+app.use(express.json());
+
+// ====================
+// Routes
+// ====================
+
+// Serve main page
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'views', 'index.html'));
+});
+
+// Fetch recent messages (limit 100)
+app.get('/messages', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM whatsapp_messages ORDER BY timestamp DESC LIMIT 100'
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('❌ Error fetching messages:', err);
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+});
+
+// ====================
+// WhatsApp Client Setup
+// ====================
+const client = new Client({
+  authStrategy: new LocalAuth(),
+  puppeteer: {
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  },
+});
+
+// QR code for authentication
+client.on('qr', (qr) => {
+  console.log('📲 Scan the QR code below to login:');
+  qrcode.generate(qr, { small: true });
+});
+
+// Store incoming messages to PostgreSQL
+client.on('message', async (msg) => {
+  if (!msg.fromMe) { // Only received messages
+    try {
+      const { _serialized: messageId } = msg.id;
+      const sender = msg.from;
+      const message = msg.body;
+      const timestamp = msg.timestamp;
+
+      await pool.query(
+        `INSERT INTO whatsapp_messages (message_id, sender, message, timestamp)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (message_id) DO NOTHING`,
+        [messageId, sender, message, timestamp]
+      );
+
+      console.log(`✅ Message from ${sender} stored in database`);
+    } catch (err) {
+      console.error('❌ Error storing message:', err);
+    }
+  }
+});
+
+// WhatsApp client ready
+client.on('ready', () => {
+  console.log('✅ WhatsApp client is ready!');
+});
+
+client.initialize();
+
+// ====================
+// Start Express Server
+// ====================
+app.listen(port, () => {
+  console.log(`🌐 Server running at http://localhost:${port}`);
+});
+public/style.css /* public/style.css */
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  margin: 0;
+  padding: 0;
+  background-color: #f0f2f5;
+  color: #333;
+}
+
+.container {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+header {
+  text-align: center;
+  margin-bottom: 30px;
+  padding: 20px;
+  background-color: #25d366;
+  color: white;
+  border-radius: 8px;
+}
+
+.status {
+  margin-bottom: 20px;
+  padding: 15px;
+  background-color: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.messages-container {
+  background-color: white;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+#refresh-btn {
+  background-color: #25d366;
+  color: white;
+  border: none;
+  padding: 10px 15px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-bottom: 15px;
+}
+
+#refresh-btn:hover {
+  background-color: #128c7e;
+}
+
+.message {
+  border-bottom: 1px solid #eee;
+  padding: 15px 0;
+}
+
+.message:last-child {
+  border-bottom: none;
+}
+
+.sender {
+  font-weight: bold;
+  color: #128c7e;
+}
+
+.timestamp {
+  font-size: 0.8em;
+  color: #888;
+}
+
+.message-content {
+  margin-top: 5px;
+}  public/script.js // public/script.js
+document.addEventListener('DOMContentLoaded', function() {
+  const messagesList = document.getElementById('messages-list');
+  const refreshBtn = document.getElementById('refresh-btn');
+  const statusElement = document.getElementById('status');
+  
+  // Function to fetch and display messages
+  async function fetchMessages() {
+    try {
+      const response = await fetch('/messages');
+      const messages = await response.json();
+      
+      if (messages.length === 0) {
+        messagesList.innerHTML = '<p>No messages found.</p>';
+        return;
+      }
+      
+      messagesList.innerHTML = '';
+      messages.forEach(msg => {
+        const messageElement = document.createElement('div');
+        messageElement.className = 'message';
+        
+        const date = new Date(msg.timestamp * 1000);
+        const formattedDate = date.toLocaleString();
+        
+        messageElement.innerHTML = `
+          <div class="sender">From: ${msg.sender}</div>
+          <div class="timestamp">${formattedDate}</div>
+          <div class="message-content">${msg.message}</div>
+        `;
+        
+        messagesList.appendChild(messageElement);
+      });
+    } catch (error) {
+      console.error('Error fetching messages:', error);
+      messagesList.innerHTML = '<p>Error loading messages.</p>';
+    }
+  }
+  
+  // Check WhatsApp connection status
+  function checkStatus() {
+    // This would ideally connect to your backend to get the actual status
+    // For now, we'll simulate it
+    statusElement.textContent = 'Connected';
+    statusElement.style.color = 'green';
+  }
+  
+  // Event listeners
+  refreshBtn.addEventListener('click', fetchMessages);
+  
+  // Initial load
+  checkStatus();
+  fetchMessages();
+  
+  // Refresh messages every 30 seconds
+  setInterval(fetchMessages, 30000);
+});  .env DB_USER=postgres
+DB_HOST=localhost
+DB_NAME=whatsapp_messages
+DB_PASSWORD=root
+DB_PORT=5432
+PORT=3000  rewrite all the file i want when i erun initally qr code shor when i scaan then show like this index. html like windows rewrite all project looks professional save data properly in db rewrote all the files good way 

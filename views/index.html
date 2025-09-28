@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WhatsApp Message Logger</title>
+  <link rel="stylesheet" href="/style.css">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1><i class="fab fa-whatsapp"></i> WhatsApp Message Logger</h1>
+      <p>Monitor and store all incoming WhatsApp messages in PostgreSQL</p>
+    </header>
+    
+    <div class="dashboard">
+      <div class="status-card">
+        <h2>System Status</h2>
+        <div class="status-info">
+          <div class="status-item">
+            <span class="label">WhatsApp:</span>
+            <span id="whatsapp-status" class="status-badge">Checking...</span>
+          </div>
+          <div class="status-item">
+            <span class="label">Database:</span>
+            <span id="database-status" class="status-badge success">Connected</span>
+          </div>
+          <div class="status-item">
+            <span class="label">Messages:</span>
+            <span id="message-count">0</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="qr-container" id="qr-container" style="display: none;">
+        <h2>Scan QR Code</h2>
+        <div class="qr-code" id="qr-code"></div>
+        <p>Open WhatsApp > Settings > Linked Devices > Link a Device</p>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="refresh-btn" class="btn btn-primary">
+        <i class="fas fa-sync-alt"></i> Refresh Messages
+      </button>
+      <button id="clear-btn" class="btn btn-secondary">
+        <i class="fas fa-trash"></i> Clear Display
+      </button>
+    </div>
+
+    <div class="messages-container">
+      <h2>Recent Messages</h2>
+      <div class="filters">
+        <input type="text" id="search-input" placeholder="Search messages...">
+        <select id="filter-select">
+          <option value="all">All Messages</option>
+          <option value="group">Group Messages</option>
+          <option value="individual">Individual Messages</option>
+        </select>
+      </div>
+      <div id="messages-list" class="messages-list"></div>
+      <div id="loading" class="loading">Loading messages...</div>
+      <button id="load-more" class="btn btn-secondary" style="display: none;">
+        Load More Messages
+      </button>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+  <script src="/script.js"></script>
+</body>
+</html>

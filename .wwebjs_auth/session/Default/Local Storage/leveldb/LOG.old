@@ -1,0 +1,5 @@
+2025/08/28-22:51:25.225 bb4 Creating DB D:\P2\whatsapp-postgres-logger\.wwebjs_auth\session\Default\Local Storage\leveldb since it was missing.
+2025/08/28-22:51:25.444 bb4 Reusing MANIFEST D:\P2\whatsapp-postgres-logger\.wwebjs_auth\session\Default\Local Storage\leveldb/MANIFEST-000001
+2025/08/30-20:06:45.763 7780 Level-0 table #5: started
+2025/08/30-20:06:45.833 7780 Level-0 table #5: 18776 bytes OK
+2025/08/30-20:06:45.891 7780 Delete type=0 #3
